@@ -26,12 +26,26 @@ gemini-chat() {
   echo -e "Type \033[1;33mexit\033[0m or \033[1;33mquit\033[0m to end the session.\n"
 
   while true; do
-    read -r -p "Chat > " user_input
+    echo -n "Chat > "
+    local user_input=""
+    local line
     
-    if [ "$user_input" = "exit" ] || [ "$user_input" = "quit" ]; then
+    if ! IFS= read -r line; then
+      break
+    fi
+
+    if [ "$line" = "exit" ] || [ "$line" = "quit" ]; then
       echo "Session ended."
       break
     fi
+
+    user_input="$line"
+
+    # Read remaining buffered input (e.g. multiline paste) with 0.1s timeout
+    while IFS= read -r -t 0.1 line; do
+      user_input="$user_input
+$line"
+    done
     
     if [ -z "$user_input" ]; then
       continue
@@ -70,8 +84,9 @@ gemini-chat() {
       history=$(echo "$history" | jq --arg model_text "$text_out" '. + [{role: "model", parts: [{text: $model_text}]}]')
 
       if echo "$text_out" | grep -q '```bash'; then
-        local cmd=$(echo "$text_out" | sed -n '/```bash/,/```/p' | sed '1d;$d')
-        echo -e "\n\033[1;33m[Auto-Exec (Shell Live)]:\033[0m"
+        local cmd=$(echo "$text_out" | awk '/```bash/{flag=1; next} /```/{if(flag) exit} flag')
+        echo -e "\n\033[1;36m[Gemini]:\033[0m $text_out"
+        echo -e "\033[1;33m[Command to execute]:\033[0m\n\033[1;32m$cmd\033[0m"
         
         local output=$(bash -c "set -x; $cmd" 2>&1)
         echo -e "\033[0;36m$output\033[0m"
