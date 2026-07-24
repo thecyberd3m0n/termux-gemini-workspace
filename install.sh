@@ -5,15 +5,15 @@
 set -eu
 
 # Dependencies required by the AI functions (gemini.sh) that are absent from the default Termux build.
-# grep/sed/bash are in the base; curl and jq must be installed.
+# grep/sed/bash are in the base; curl, jq and python/markdownify must be installed.
 ensure_deps() {
   local missing=""
-  for _dep in curl jq; do
+  for _dep in curl jq python; do
     command -v "$_dep" >/dev/null 2>&1 || missing="$missing $_dep"
   done
 
   if [ -n "$missing" ]; then
-    echo "ai-features: missing dependencies:$missing - installing..."
+    echo "ai-features: missing binary dependencies:$missing - installing..."
     if command -v pkg >/dev/null 2>&1; then
       pkg install -y $missing
     elif command -v apt >/dev/null 2>&1; then
@@ -23,7 +23,14 @@ ensure_deps() {
       return 1
     fi
   else
-    echo "ai-features: dependencies (curl, jq) already installed."
+    echo "ai-features: binary dependencies (curl, jq, python) already installed."
+  fi
+
+  if ! python3 -c "import markdownify" >/dev/null 2>&1; then
+    echo "ai-features: installing markdownify via pip..."
+    pip install markdownify
+  else
+    echo "ai-features: python module markdownify already installed."
   fi
 }
 

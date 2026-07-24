@@ -17,7 +17,26 @@ gemini() {
 # Autonomous agent in PWD with a live view of actions in the shell
 gemini-chat() {
   local pwd_path=$(pwd)
-  local system_instruction="You are an autonomous CLI agent working directly in the directory: ${pwd_path}. You have full permissions to create and modify files and run commands. IMPORTANT: You do NOT have access to any tools or function calling - do not call functions such as run_bash. To execute a command, return it ONLY as plain text inside a bash block: \`\`\`bash\ncommand\n\`\`\`. Perform the steps autonomously until you reach the goal given by the user. When you are done, provide a concise summary without a bash block."
+  local env_instructions=""
+
+  if [ -n "${AI_FEATURES:-}" ]; then
+    local _file
+    local _files=$(echo "$AI_FEATURES" | tr ':' ' ')
+    for _file in $_files; do
+      if [ -f "$_file" ]; then
+        local _content
+        _content=$(cat "$_file")
+        if [ -n "$_content" ]; then
+          env_instructions="${env_instructions}
+
+--- Environment Documentation ($_file) ---
+${_content}"
+        fi
+      fi
+    done
+  fi
+
+  local system_instruction="You are an autonomous CLI agent working directly in the directory: ${pwd_path}. You have full permissions to create and modify files and run commands. IMPORTANT: You do NOT have access to any tools or function calling - do not call functions such as run_bash. To execute a command, return it ONLY as plain text inside a bash block: \`\`\`bash\ncommand\n\`\`\`. Perform the steps autonomously until you reach the goal given by the user. When you are done, provide a concise summary without a bash block.${env_instructions}"
   
   local history="[]"
   local retries=0
