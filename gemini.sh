@@ -38,7 +38,15 @@ ${_content}"
 
   local system_instruction="You are an autonomous CLI agent working directly in the directory: ${pwd_path}. You have full permissions to create and modify files and run commands. IMPORTANT: You do NOT have access to any tools or function calling - do not call functions such as run_bash. To execute a command, return it ONLY as plain text inside a bash block: \`\`\`bash\ncommand\n\`\`\`. Perform the steps autonomously until you reach the goal given by the user. When you are done, provide a concise summary without a bash block.${env_instructions}"
   
-  local history="[]"
+  local history_file=$(mktemp)
+  local sys_file=$(mktemp)
+  local temp_file=$(mktemp)
+  
+  echo "[]" > "$history_file"
+  echo -n "$system_instruction" > "$sys_file"
+
+  trap 'rm -f "$history_file" "$sys_file" "$temp_file"' EXIT INT TERM
+
   local retries=0
   
   echo -e "\033[1;32m=== Autonomous Gemini Agent in: ${pwd_path} ===\033[0m"
@@ -70,17 +78,21 @@ $line"
       continue
     fi
 
-    history=$(echo "$history" | jq --arg input "$user_input" '. + [{role: "user", parts: [{text: $input}]}]')
+    # Append user input safely via temp file to avoid ARG_MAX limit
+    echo -n "$user_input" > "$temp_file"
+    jq --rawfile input "$temp_file" '. + [{role: "user", parts: [{text: $input}]}]' "$history_file" > "${history_file}.tmp" && mv "${history_file}.tmp" "$history_file"
 
     while true; do
-      local payload=$(jq -n \
-        --arg sys "$system_instruction" \
-        --argjson contents "$history" \
-        '{system_instruction: {parts: [{text: $sys}]}, contents:$contents}')
+      jq -n \
+        --rawfile sys "$sys_file" \
+        --slurpfile contents "$history_file" \
+        '{system_instruction: {parts: [{text: $sys}]}, contents: $contents[0]}' > "$temp_file"
 
-      local response=$(curl -s -H "Content-Type: application/json" -d "$payload" "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=$GEMINI_API_KEY")
-      local text_out=$(echo "$response" | jq -r '.candidates[0].content.parts[0].text // empty')
-      local finish_reason=$(echo "$response" | jq -r '.candidates[0].finishReason // empty')
+      local response=$(curl -s -H "Content-Type: application/json" -d @"$temp_file" "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=$GEMINI_API_KEY")
+      
+      echo "$response" > "$temp_file"
+      local text_out=$(jq -r '.candidates[0].content.parts[0].text // empty' "$temp_file")
+      local finish_reason=$(jq -r '.candidates[0].finishReason // empty' "$temp_file")
 
       if [ -z "$text_out" ]; then
         # Gemini 3 sometimes tries to call a native tool instead of returning text.
@@ -88,19 +100,21 @@ $line"
           retries=$((retries + 1))
           echo -e "\033[1;33m[Model tried to use a tool - retrying ($retries/3)...]\033[0m"
           local nudge="ERROR: Do not call functions/tools (function calling). Return the command ONLY as plain text inside a \`\`\`bash ... \`\`\` block."
-          history=$(echo "$history" | jq --arg n "$nudge" '. + [{role: "user", parts: [{text: $n}]}]')
+          echo -n "$nudge" > "$temp_file"
+          jq --rawfile n "$temp_file" '. + [{role: "user", parts: [{text: $n}]}]' "$history_file" > "${history_file}.tmp" && mv "${history_file}.tmp" "$history_file"
           continue
         fi
         echo -e "\033[1;31mAPI response error (finishReason: ${finish_reason:-none}).\033[0m"
         echo -e "\033[1;33m[Sent prompt/payload]:\033[0m"
-        echo "$payload" | jq .
+        jq . "$temp_file"
         echo -e "\033[1;31m[API response]:\033[0m"
         echo "$response"
         break
       fi
 
       retries=0
-      history=$(echo "$history" | jq --arg model_text "$text_out" '. + [{role: "model", parts: [{text: $model_text}]}]')
+      echo -n "$text_out" > "$temp_file"
+      jq --rawfile model_text "$temp_file" '. + [{role: "model", parts: [{text: $model_text}]}]' "$history_file" > "${history_file}.tmp" && mv "${history_file}.tmp" "$history_file"
 
       if echo "$text_out" | grep -q '```bash'; then
         local cmd=$(echo "$text_out" | awk '/```bash/{flag=1; next} /```/{if(flag) exit} flag')
@@ -112,7 +126,8 @@ $line"
         
         local sys_msg="Output of command '$cmd':
 $output"
-        history=$(echo "$history" | jq --arg sys_msg "$sys_msg" '. + [{role: "user", parts: [{text: $sys_msg}]}]')
+        echo -n "$sys_msg" > "$temp_file"
+        jq --rawfile sys_msg "$temp_file" '. + [{role: "user", parts: [{text: $sys_msg}]}]' "$history_file" > "${history_file}.tmp" && mv "${history_file}.tmp" "$history_file"
       else
         echo -e "\n\033[1;36m[Gemini]:\033[0m $text_out\n"
         break
