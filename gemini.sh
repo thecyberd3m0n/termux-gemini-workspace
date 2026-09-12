@@ -4,8 +4,8 @@
 # Token threshold settings (80% of 1,048,576 limit = ~838,860 tokens)
 GEMINI_MAX_INPUT_TOKENS=1048576
 GEMINI_COMPRESSION_THRESHOLD=838860
-# Truncate extremely large single command outputs (>50KB) to prevent instant context overflow
-MAX_OUTPUT_BYTES=50000
+# Truncate extremely large single command outputs (>25KB) to prevent instant context overflow
+MAX_OUTPUT_BYTES=25000
 
 # Alias for simple questions
 gemini() {
@@ -183,15 +183,15 @@ $line"
         
         local output="$raw_output"
         local output_size=${#raw_output}
-        if [ "$output_size" -gt "${MAX_OUTPUT_BYTES:-50000}" ]; then
-          local head_part="${raw_output:0:20000}"
-          local tail_part="${raw_output: -20000}"
+        if [ "$output_size" -gt "${MAX_OUTPUT_BYTES:-25000}" ]; then
+          local head_part="${raw_output:0:10000}"
+          local tail_part="${raw_output: -10000}"
           output="${head_part}
 
-... [OUTPUT TRUNCATED: ${output_size} bytes total (showing first 20KB & last 20KB)] ...
+... [OUTPUT TRUNCATED: ${output_size} bytes total (showing first 10KB & last 10KB)] ...
 
 ${tail_part}"
-          echo -e "\033[1;33m[Command output truncated from ${output_size} to ~40KB for token optimization]\033[0m"
+          echo -e "\033[1;33m[Command output truncated from ${output_size} to ~20KB for token optimization]\033[0m"
         fi
         
         local sys_msg="Output of command '$cmd':
