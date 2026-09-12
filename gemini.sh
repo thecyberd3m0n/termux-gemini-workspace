@@ -87,7 +87,7 @@ ${_content}"
     done
   fi
 
-  local system_instruction="You are an autonomous CLI agent working directly in the directory: ${pwd_path}. You have full permissions to create and modify files and run commands. IMPORTANT: You do NOT have access to any tools or function calling - do not call functions such as run_bash. To execute a command, return it ONLY as plain text inside a bash block: \`\`\`bash\ncommand\n\`\`\`. Perform the steps autonomously until you reach the goal given by the user. When you are done, provide a concise summary without a bash block.${env_instructions}"
+  local system_instruction="You are an autonomous CLI agent working directly in the directory: ${pwd_path}. You have full permissions to create and modify files and run commands. IMPORTANT: You do NOT have access to any tools or function calling - do not call functions such as run_bash. To execute a command, return it ONLY as plain text inside a bash block: \`\`\`bash\ncommand\n\`\`\`. Before proceeding to do the task - check if you can, and ask questions. Confirm with user steps you want to take. ALWAYS paginate terminal output when running commands, or scripts we're develop (e.g. use grep, head, tail, quiet flags, or filter logs/output) to avoid large stdout payloads that cause errors or break the workflow. Perform the steps autonomously until you reach the goal given by the user. Work in small steps. When you are done, provide a concise summary without a bash block.${env_instructions}"
   
   local history_file=$(mktemp)
   local sys_file=$(mktemp)
@@ -101,6 +101,33 @@ ${_content}"
   local retries=0
   
   echo -e "\033[1;32m=== Autonomous Gemini Agent in: ${pwd_path} ===\033[0m"
+
+  # AI Warmup / Sanity Check
+  echo -e "\033[1;34m[AI Warmup]: Running sanity check...\033[0m"
+
+  if [ -z "${GEMINI_API_KEY:-}" ]; then
+    echo -e "\033[1;31m[AI Warmup Failed]: GEMINI_API_KEY is not set.\033[0m"
+    return 1
+  fi
+
+  jq -n \
+    --rawfile sys "$sys_file" \
+    '{system_instruction: {parts: [{text: $sys}]}, contents: [{role: "user", parts: [{text: "Sanity check. Reply with OK."}]}]}' > "$temp_file"
+
+  local warmup_res=$(curl -s -H "Content-Type: application/json" -d @"$temp_file" "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=$GEMINI_API_KEY")
+  echo "$warmup_res" > "$temp_file"
+  local warmup_text=$(jq -r '.candidates[0].content.parts[0].text // empty' "$temp_file")
+
+  if [ -z "$warmup_text" ]; then
+    echo -e "\033[1;31m[AI Warmup Failed]: Unable to communicate with Gemini API.\033[0m"
+    local error_msg=$(jq -r '.error.message // empty' "$temp_file")
+    if [ -n "$error_msg" ]; then
+      echo -e "\033[1;31mError details: $error_msg\033[0m"
+    fi
+    return 1
+  fi
+
+  echo -e "\033[1;32m[AI Warmup OK]: AI is ready to work.\033[0m\n"
   echo -e "Type \033[1;33mexit\033[0m or \033[1;33mquit\033[0m to end the session.\n"
 
   while true; do
