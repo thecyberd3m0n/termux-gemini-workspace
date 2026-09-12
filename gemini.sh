@@ -1,6 +1,12 @@
 # AI Functions - Gemini
 # Requires the GEMINI_API_KEY variable (loaded from ~/logins.sh)
 
+# Token threshold settings (80% of 1,048,576 limit = ~838,860 tokens)
+GEMINI_MAX_INPUT_TOKENS=1048576
+GEMINI_COMPRESSION_THRESHOLD=838860
+# Truncate extremely large single command outputs (>50KB) to prevent instant context overflow
+MAX_OUTPUT_BYTES=50000
+
 # Alias for simple questions
 gemini() {
   if [ -z "$1" ]; then
@@ -12,6 +18,51 @@ gemini() {
     -d "{\"contents\":[{\"parts\":[{\"text\":\"$1\"}]}]}" \
     "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=$GEMINI_API_KEY" \
     | grep -o '"text": "[^"]*"' | sed 's/"text": "//;s/"$//'
+}
+
+# Helper to compress history
+_compress_gemini_history() {
+  local history_file="$1"
+  local sys_file="$2"
+  local temp_file="$3"
+
+  local history_len=$(jq 'length' "$history_file")
+  if [ "$history_len" -le 2 ]; then
+    return 0
+  fi
+
+  echo -e "\033[1;33m[History reached 80% token quota. Compressing older conversation history...]\033[0m"
+
+  local older_history=$(jq '.[0:-1]' "$history_file")
+  local last_turn=$(jq '.[-1]' "$history_file")
+
+  local summarize_prompt="You are a context compression assistant. Summarize the following conversation history into a concise, high-density structured context summary. You MUST preserve:
+1. The active overall goal and task state.
+2. Key files created, modified, or examined.
+3. Crucial command results and system status.
+4. Any explicit user preferences or constraints.
+
+Conversation history to summarize:
+${older_history}"
+
+  echo -n "$summarize_prompt" > "$temp_file"
+  jq -n --rawfile sys "$sys_file" --rawfile prompt "$temp_file" \
+    '{system_instruction: {parts: [{text: $sys}]}, contents: [{role: "user", parts: [{text: $prompt}]}]}' > "${temp_file}.payload"
+
+  local summary_response=$(curl -s -H "Content-Type: application/json" -d @"${temp_file}.payload" "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=$GEMINI_API_KEY")
+  rm -f "${temp_file}.payload"
+
+  local summary_text=$(echo "$summary_response" | jq -r '.candidates[0].content.parts[0].text // empty')
+
+  if [ -n "$summary_text" ]; then
+    local summary_entry=$(jq -n --arg sum "--- COMPRESSED PREVIOUS CONVERSATION CONTEXT SUMMARY ---
+$summary_text" '[{role: "user", parts: [{text: $sum}]}, {role: "model", parts: [{text: "Understood. I have restored context from the compressed summary and am ready to continue."}]}]')
+
+    jq -n --argjson summary "$summary_entry" --argjson last "[$last_turn]" '$summary + $last' > "${history_file}.tmp" && mv "${history_file}.tmp" "$history_file"
+    echo -e "\033[1;32m[History compression complete.]\033[0m"
+  else
+    echo -e "\033[1;31m[History compression failed, keeping existing history.]\033[0m"
+  fi
 }
 
 # Autonomous agent in PWD with a live view of actions in the shell
@@ -93,6 +144,7 @@ $line"
       echo "$response" > "$temp_file"
       local text_out=$(jq -r '.candidates[0].content.parts[0].text // empty' "$temp_file")
       local finish_reason=$(jq -r '.candidates[0].finishReason // empty' "$temp_file")
+      local prompt_tokens=$(jq -r '.usageMetadata.promptTokenCount // 0' "$temp_file")
 
       if [ -z "$text_out" ]; then
         # Gemini 3 sometimes tries to call a native tool instead of returning text.
@@ -112,6 +164,11 @@ $line"
         break
       fi
 
+      # Check if prompt token count exceeds 80% quota threshold
+      if [ "$prompt_tokens" -ge "${GEMINI_COMPRESSION_THRESHOLD:-838860}" ]; then
+        _compress_gemini_history "$history_file" "$sys_file" "$temp_file"
+      fi
+
       retries=0
       echo -n "$text_out" > "$temp_file"
       jq --rawfile model_text "$temp_file" '. + [{role: "model", parts: [{text: $model_text}]}]' "$history_file" > "${history_file}.tmp" && mv "${history_file}.tmp" "$history_file"
@@ -121,8 +178,21 @@ $line"
         echo -e "\n\033[1;36m[Gemini]:\033[0m $text_out"
         echo -e "\033[1;33m[Command to execute]:\033[0m\n\033[1;32m$cmd\033[0m"
         
-        local output=$(bash -c "set -x; $cmd" 2>&1)
-        echo -e "\033[0;36m$output\033[0m"
+        local raw_output=$(bash -c "set -x; $cmd" 2>&1)
+        echo -e "\033[0;36m$raw_output\033[0m"
+        
+        local output="$raw_output"
+        local output_size=${#raw_output}
+        if [ "$output_size" -gt "${MAX_OUTPUT_BYTES:-50000}" ]; then
+          local head_part="${raw_output:0:20000}"
+          local tail_part="${raw_output: -20000}"
+          output="${head_part}
+
+... [OUTPUT TRUNCATED: ${output_size} bytes total (showing first 20KB & last 20KB)] ...
+
+${tail_part}"
+          echo -e "\033[1;33m[Command output truncated from ${output_size} to ~40KB for token optimization]\033[0m"
+        fi
         
         local sys_msg="Output of command '$cmd':
 $output"
