@@ -1,6 +1,12 @@
 # AI Functions - Gemini
 # Requires the GEMINI_API_KEY variable (loaded from ~/logins.sh)
 
+# Token threshold settings (80% of 1,048,576 limit = ~838,860 tokens)
+GEMINI_MAX_INPUT_TOKENS=1048576
+GEMINI_COMPRESSION_THRESHOLD=100000
+# Truncate extremely large single command outputs (>25KB) to prevent instant context overflow
+MAX_OUTPUT_BYTES=25000
+
 # Alias for simple questions
 gemini() {
   if [ -z "$1" ]; then
@@ -12,6 +18,52 @@ gemini() {
     -d "{\"contents\":[{\"parts\":[{\"text\":\"$1\"}]}]}" \
     "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=$GEMINI_API_KEY" \
     | grep -o '"text": "[^"]*"' | sed 's/"text": "//;s/"$//'
+}
+
+# Helper to compress history
+_compress_gemini_history() {
+  local history_file="$1"
+  local sys_file="$2"
+  local temp_file="$3"
+
+  local history_len=$(jq 'length' "$history_file")
+  if [ "$history_len" -le 2 ]; then
+    return 0
+  fi
+
+  echo -e "\033[1;33m[History reached 80% token quota. Compressing older conversation history...]\033[0m"
+
+  local older_history=$(jq '.[0:-2]' "$history_file")
+  local recent_history=$(jq '.[-2:]' "$history_file")
+  older_history=$(echo "$older_history" | jq 'map(if .parts[0].text then .parts[0].text |= (if length > 1000 then .[0:500] + "\n... [TRUNCATED] ...\n" + .[-500:] else . end) else . end)')
+
+  local summarize_prompt="You are a context compression assistant. Summarize the following conversation history into a concise, high-density structured context summary. You MUST preserve:
+1. The active overall goal and task state.
+2. Key files created, modified, or examined.
+3. Crucial command results and system status.
+4. Any explicit user preferences or constraints.
+
+Conversation history to summarize:
+${older_history}"
+
+  echo -n "$summarize_prompt" > "$temp_file"
+  jq -n --rawfile sys "$sys_file" --rawfile prompt "$temp_file" \
+    '{system_instruction: {parts: [{text: $sys}]}, contents: [{role: "user", parts: [{text: $prompt}]}]}' > "${temp_file}.payload"
+
+  local summary_response=$(curl -s -H "Content-Type: application/json" -d @"${temp_file}.payload" "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=$GEMINI_API_KEY")
+  rm -f "${temp_file}.payload"
+
+  local summary_text=$(echo "$summary_response" | jq -r '.candidates[0].content.parts[0].text // empty')
+
+  if [ -n "$summary_text" ]; then
+    local summary_entry=$(jq -n --arg sum "--- COMPRESSED PREVIOUS CONVERSATION CONTEXT SUMMARY ---
+$summary_text" '[{role: "user", parts: [{text: $sum}]}, {role: "model", parts: [{text: "Understood. I have restored context from the compressed summary and am ready to continue."}]}]')
+
+    jq -n --argjson summary "$summary_entry" --argjson recent "$recent_history" '$summary + $recent' > "${history_file}.tmp" && mv "${history_file}.tmp" "$history_file"
+    echo -e "\033[1;32m[History compression complete.]\033[0m"
+  else
+    echo -e "\033[1;31m[History compression failed, keeping existing history.]\033[0m"
+  fi
 }
 
 # Autonomous agent in PWD with a live view of actions in the shell
@@ -36,7 +88,7 @@ ${_content}"
     done
   fi
 
-  local system_instruction="You are an autonomous CLI agent working directly in the directory: ${pwd_path}. You have full permissions to create and modify files and run commands. IMPORTANT: You do NOT have access to any tools or function calling - do not call functions such as run_bash. To execute a command, return it ONLY as plain text inside a bash block: \`\`\`bash\ncommand\n\`\`\`. Before proceeding to do the task - check if you can, and ask questions. Confirm with user steps you want to take. ALWAYS paginate terminal output when running commands, or scripts we're develop (e.g. use grep, head, tail, quiet flags, or filter logs/output) to avoid large stdout payloads that cause errors or break the workflow. Perform the steps autonomously until you reach the goal given by the user. Work in small steps. When you are done, provide a concise summary without a bash block.${env_instructions}"
+  local system_instruction="You are an autonomous CLI agent working directly in the directory: ${pwd_path}. You have full permissions to create and modify files and run commands. IMPORTANT: You do NOT have access to any tools or function calling - do not call functions such as run_bash. To execute a command, return it ONLY as plain text inside a bash block: \`\`\`bash\ncommand\n\`\`\`. Perform the steps autonomously until you reach the goal given by the user. Work in small steps. ALWAYS paginate terminal output when running commands or scripts (e.g. use grep, head, tail, quiet flags, or filter logs/output) to avoid large stdout payloads. When you are done, provide a concise summary without a bash block.${env_instructions}"
   
   local history_file=$(mktemp)
   local sys_file=$(mktemp)
@@ -48,6 +100,7 @@ ${_content}"
   trap 'rm -f "$history_file" "$sys_file" "$temp_file"' EXIT INT TERM
 
   local retries=0
+  local prompt_tokens=0
   
   echo -e "\033[1;32m=== Autonomous Gemini Agent in: ${pwd_path} ===\033[0m"
 
@@ -110,6 +163,10 @@ $line"
     jq --rawfile input "$temp_file" '. + [{role: "user", parts: [{text: $input}]}]' "$history_file" > "${history_file}.tmp" && mv "${history_file}.tmp" "$history_file"
 
     while true; do
+      if [ "$prompt_tokens" -ge "${GEMINI_COMPRESSION_THRESHOLD:-100000}" ]; then
+        _compress_gemini_history "$history_file" "$sys_file" "$temp_file"
+      fi
+
       jq -n \
         --rawfile sys "$sys_file" \
         --slurpfile contents "$history_file" \
@@ -120,6 +177,7 @@ $line"
       echo "$response" > "$temp_file"
       local text_out=$(jq -r '.candidates[0].content.parts[0].text // empty' "$temp_file")
       local finish_reason=$(jq -r '.candidates[0].finishReason // empty' "$temp_file")
+      prompt_tokens=$(jq -r '.usageMetadata.promptTokenCount // 0' "$temp_file")
 
       if [ -z "$text_out" ]; then
         # Gemini 3 sometimes tries to call a native tool instead of returning text.
@@ -148,8 +206,21 @@ $line"
         echo -e "\n\033[1;36m[Gemini]:\033[0m $text_out"
         echo -e "\033[1;33m[Command to execute]:\033[0m\n\033[1;32m$cmd\033[0m"
         
-        local output=$(bash -c "set -x; $cmd" 2>&1)
-        echo -e "\033[0;36m$output\033[0m"
+        local raw_output=$(bash -c "set -x; $cmd" 2>&1)
+        echo -e "\033[0;36m$raw_output\033[0m"
+        
+        local output="$raw_output"
+        local output_size=${#raw_output}
+        if [ "$output_size" -gt "${MAX_OUTPUT_BYTES:-25000}" ]; then
+          local head_part="${raw_output:0:10000}"
+          local tail_part="${raw_output: -10000}"
+          output="${head_part}
+
+... [OUTPUT TRUNCATED: ${output_size} bytes total (showing first 10KB & last 10KB)] ...
+
+${tail_part}"
+          echo -e "\033[1;33m[Command output truncated from ${output_size} to ~20KB for token optimization]\033[0m"
+        fi
         
         local sys_msg="Output of command '$cmd':
 $output"
