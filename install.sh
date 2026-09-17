@@ -4,6 +4,8 @@
 
 set -eu
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Dependencies required by the AI functions (gemini.sh) that are absent from the default Termux build.
 # grep/sed/bash are in the base; curl, jq and python/markdownify must be installed.
 ensure_deps() {
@@ -40,21 +42,19 @@ BASHRC="$HOME/.bashrc"
 MARKER="# >>> ai-features (auto) >>>"
 MARKER_END="# <<< ai-features (auto) <<<"
 
-read -r -d '' BLOCK <<'EOF' || true
-# >>> ai-features (auto) >>>
+BLOCK="# >>> ai-features (auto) >>>
 # Logins / API keys
-[ -r "$HOME/logins.sh" ] && . "$HOME/logins.sh"
+[ -r \"\$HOME/logins.sh\" ] && . \"\$HOME/logins.sh\"
 
-# AI functions - all scripts from ~/ai-features (skipping install.sh)
-if [ -d "$HOME/ai-features" ]; then
-  for _ai_script in "$HOME/ai-features"/*.sh; do
-    [ "$(basename "$_ai_script")" = "install.sh" ] && continue
-    [ -r "$_ai_script" ] && . "$_ai_script"
+# AI functions - all scripts from ${SCRIPT_DIR} (skipping install.sh)
+if [ -d \"${SCRIPT_DIR}\" ]; then
+  for _ai_script in \"${SCRIPT_DIR}\"/*.sh; do
+    [ \"\$(basename \"\$_ai_script\")\" = \"install.sh\" ] && continue
+    [ -r \"\$_ai_script\" ] && . \"\$_ai_script\"
   done
   unset _ai_script
 fi
-# <<< ai-features (auto) <<<
-EOF
+# <<< ai-features (auto) <<<"
 
 touch "$BASHRC"
 
