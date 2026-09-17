@@ -1,0 +1,1 @@
+ERROR: Do not call functions/tools (function calling). Return the command ONLY as plain text inside a ```bash ... ``` block.

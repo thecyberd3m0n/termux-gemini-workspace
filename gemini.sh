@@ -1,4 +1,5 @@
 # AI Functions - Gemini
+GEMINI_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Requires the GEMINI_API_KEY variable (loaded from ~/logins.sh)
 
 # Token threshold settings (80% of 1,048,576 limit = ~838,860 tokens)
@@ -37,7 +38,14 @@ _compress_gemini_history() {
   local recent_history=$(jq '.[-2:]' "$history_file")
   older_history=$(echo "$older_history" | jq 'map(if .parts[0].text then .parts[0].text |= (if length > 1000 then .[0:500] + "\n... [TRUNCATED] ...\n" + .[-500:] else . end) else . end)')
 
-  local summarize_prompt="You are a context compression assistant. Summarize the following conversation history into a concise, high-density structured context summary. You MUST preserve:
+  local script_dir="${GEMINI_SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+  local compress_prompt_file="${script_dir}/prompts/compress_history.md"
+  local summarize_prompt=""
+  if [ -f "$compress_prompt_file" ]; then
+    summarize_prompt="$(cat "$compress_prompt_file")
+${older_history}"
+  else
+    summarize_prompt="You are a context compression assistant. Summarize the following conversation history into a concise, high-density structured context summary. You MUST preserve:
 1. The active overall goal and task state.
 2. Key files created, modified, or examined.
 3. Crucial command results and system status.
@@ -45,6 +53,7 @@ _compress_gemini_history() {
 
 Conversation history to summarize:
 ${older_history}"
+  fi
 
   echo -n "$summarize_prompt" > "$temp_file"
   jq -n --rawfile sys "$sys_file" --rawfile prompt "$temp_file" \
@@ -88,7 +97,19 @@ ${_content}"
     done
   fi
 
-  local system_instruction="You are an autonomous CLI agent working directly in the directory: ${pwd_path}. You have full permissions to create and modify files and run commands. IMPORTANT: You do NOT have access to any tools or function calling - do not call functions such as run_bash. To execute a command, return it ONLY as plain text inside a bash block: \`\`\`bash\ncommand\n\`\`\`. Perform the steps autonomously until you reach the goal given by the user. Work in small steps. ALWAYS paginate terminal output when running commands or scripts (e.g. use grep, head, tail, quiet flags, or filter logs/output) to avoid large stdout payloads. When you are done, provide a concise summary without a bash block.${env_instructions}"
+  local script_dir="${GEMINI_SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+  local sys_prompt_file="${script_dir}/prompts/system_prompt.md"
+  local system_instruction=""
+  if [ -f "$sys_prompt_file" ]; then
+    local base_prompt
+    base_prompt=$(cat "$sys_prompt_file")
+    base_prompt="${base_prompt//\{\{PWD_PATH\}\}/$pwd_path}"
+    system_instruction="${base_prompt}${env_instructions}"
+  else
+    system_instruction="You are an autonomous CLI agent working directly in the directory: ${pwd_path}. You have full permissions to create and modify files and run commands. IMPORTANT: You do NOT have access to any tools or function calling - do not call functions such as run_bash. To execute a command, return it ONLY as plain text inside a bash block: \`\`\`bash
+command
+\`\`\`. Perform the steps autonomously until you reach the goal given by the user. ALWAYS paginate terminal output when running commands or scripts (e.g. use grep, head, tail, quiet flags, or filter logs/output) to avoid large stdout payloads. When you are done, provide a concise summary without a bash block.${env_instructions}"
+  fi
   
   local history_file=$(mktemp)
   local sys_file=$(mktemp)
@@ -184,7 +205,13 @@ $line"
         if [ "$finish_reason" = "MALFORMED_FUNCTION_CALL" ] && [ "$retries" -lt 3 ]; then
           retries=$((retries + 1))
           echo -e "\033[1;33m[Model tried to use a tool - retrying ($retries/3)...]\033[0m"
-          local nudge="ERROR: Do not call functions/tools (function calling). Return the command ONLY as plain text inside a \`\`\`bash ... \`\`\` block."
+          local nudge_file="${script_dir}/prompts/function_call_nudge.md"
+          local nudge=""
+          if [ -f "$nudge_file" ]; then
+            nudge=$(cat "$nudge_file")
+          else
+            nudge="ERROR: Do not call functions/tools (function calling). Return the command ONLY as plain text inside a \`\`\`bash ... \`\`\` block."
+          fi
           echo -n "$nudge" > "$temp_file"
           jq --rawfile n "$temp_file" '. + [{role: "user", parts: [{text: $n}]}]' "$history_file" > "${history_file}.tmp" && mv "${history_file}.tmp" "$history_file"
           continue
